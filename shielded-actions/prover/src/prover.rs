@@ -2,7 +2,8 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use std::collections::HashMap;
-use tracing::{info, warn};
+use std::sync::Mutex;
+use tracing::{info, warn, error};
 
 /// Proof response structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,14 +20,22 @@ pub struct ProofData {
     pub image_id: String,
 }
 
-/// Prover service that interfaces with Bonsai/Boundless
+/// Session tracking for async proof generation
+#[derive(Debug, Clone)]
+struct ProofSession {
+    session_id: String,
+    status: String,
+    proof: Option<ProofData>,
+}
+
+/// Prover service that interfaces with Bonsai
 pub struct ProverService {
     // Bonsai API configuration
     bonsai_api_key: Option<String>,
-    bonsai_api_url: Option<String>,
+    bonsai_api_url: String,
 
-    // In-memory proof cache (for demo purposes)
-    proofs: HashMap<String, ProofResponse>,
+    // In-memory proof cache
+    proofs: Mutex<HashMap<String, ProofSession>>,
 
     // Use mock mode if no API key is set
     mock_mode: bool,
@@ -35,20 +44,21 @@ pub struct ProverService {
 impl ProverService {
     pub fn new() -> Result<Self> {
         let bonsai_api_key = std::env::var("BONSAI_API_KEY").ok();
-        let bonsai_api_url = std::env::var("BONSAI_API_URL").ok();
+        let bonsai_api_url = std::env::var("BONSAI_API_URL")
+            .unwrap_or_else(|_| "https://api.bonsai.xyz".to_string());
 
         let mock_mode = bonsai_api_key.is_none();
 
         if mock_mode {
             warn!("No BONSAI_API_KEY found, running in mock mode");
         } else {
-            info!("Bonsai API configured, real proofs enabled");
+            info!("Bonsai API configured at {}, real proofs enabled", bonsai_api_url);
         }
 
         Ok(Self {
             bonsai_api_key,
             bonsai_api_url,
-            proofs: HashMap::new(),
+            proofs: Mutex::new(HashMap::new()),
             mock_mode,
         })
     }
@@ -63,22 +73,19 @@ impl ProverService {
     ) -> Result<ProofResponse> {
         let proof_id = self.generate_proof_id("shield", &[token, amount, sender]);
 
-        if self.mock_mode {
-            return self.create_mock_proof(proof_id, "shield", serde_json::json!({
-                "token": token,
-                "amount": amount,
-                "sender": sender,
-                "nullifier_key_commitment": self.hash_nullifier_key(nullifier_key),
-            }));
-        }
-
-        // Real Bonsai proof generation
-        self.submit_bonsai_proof(proof_id, "shield", serde_json::json!({
+        let journal_data = serde_json::json!({
+            "action": "shield",
             "token": token,
             "amount": amount,
             "sender": sender,
-            "nullifier_key": nullifier_key,
-        })).await
+            "nullifier_key_commitment": self.hash_nullifier_key(nullifier_key),
+        });
+
+        if self.mock_mode {
+            return self.create_mock_proof(proof_id, "shield", journal_data);
+        }
+
+        self.submit_bonsai_proof(proof_id, journal_data).await
     }
 
     /// Create a swap proof
@@ -91,22 +98,19 @@ impl ProverService {
     ) -> Result<ProofResponse> {
         let proof_id = self.generate_proof_id("swap", &[output_token, min_amount_out]);
 
-        if self.mock_mode {
-            return self.create_mock_proof(proof_id, "swap", serde_json::json!({
-                "input_resource": input_resource,
-                "output_token": output_token,
-                "min_amount_out": min_amount_out,
-                "nullifier_key_commitment": self.hash_nullifier_key(nullifier_key),
-            }));
-        }
-
-        // Real Bonsai proof generation
-        self.submit_bonsai_proof(proof_id, "swap", serde_json::json!({
+        let journal_data = serde_json::json!({
+            "action": "swap",
             "input_resource": input_resource,
             "output_token": output_token,
-            "nullifier_key": nullifier_key,
             "min_amount_out": min_amount_out,
-        })).await
+            "nullifier_key_commitment": self.hash_nullifier_key(nullifier_key),
+        });
+
+        if self.mock_mode {
+            return self.create_mock_proof(proof_id, "swap", journal_data);
+        }
+
+        self.submit_bonsai_proof(proof_id, journal_data).await
     }
 
     /// Create an unshield proof
@@ -118,30 +122,35 @@ impl ProverService {
     ) -> Result<ProofResponse> {
         let proof_id = self.generate_proof_id("unshield", &[recipient]);
 
-        if self.mock_mode {
-            return self.create_mock_proof(proof_id, "unshield", serde_json::json!({
-                "resource": resource,
-                "recipient": recipient,
-                "nullifier_key_commitment": self.hash_nullifier_key(nullifier_key),
-            }));
-        }
-
-        // Real Bonsai proof generation
-        self.submit_bonsai_proof(proof_id, "unshield", serde_json::json!({
+        let journal_data = serde_json::json!({
+            "action": "unshield",
             "resource": resource,
             "recipient": recipient,
-            "nullifier_key": nullifier_key,
-        })).await
+            "nullifier_key_commitment": self.hash_nullifier_key(nullifier_key),
+        });
+
+        if self.mock_mode {
+            return self.create_mock_proof(proof_id, "unshield", journal_data);
+        }
+
+        self.submit_bonsai_proof(proof_id, journal_data).await
     }
 
     /// Get proof status
     pub async fn get_proof_status(&self, proof_id: &str) -> Result<ProofResponse> {
-        if let Some(proof) = self.proofs.get(proof_id) {
-            return Ok(proof.clone());
+        let proofs = self.proofs.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+
+        if let Some(session) = proofs.get(proof_id) {
+            return Ok(ProofResponse {
+                proof_id: proof_id.to_string(),
+                status: session.status.clone(),
+                proof: session.proof.clone(),
+            });
         }
 
-        // Check Bonsai status if not in cache
+        // If not in cache and we have Bonsai configured, check status
         if !self.mock_mode {
+            drop(proofs); // Release lock before async call
             return self.check_bonsai_status(proof_id).await;
         }
 
@@ -193,57 +202,69 @@ impl ProverService {
         // Mock image ID (would be the actual guest program ID)
         let image_id = "mock_shielded_actions_guest_v1";
 
+        let proof_data = ProofData {
+            journal: journal_hex,
+            seal,
+            image_id: image_id.to_string(),
+        };
+
+        // Store in cache
+        let mut proofs = self.proofs.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+        proofs.insert(proof_id.clone(), ProofSession {
+            session_id: proof_id.clone(),
+            status: "completed".to_string(),
+            proof: Some(proof_data.clone()),
+        });
+
         Ok(ProofResponse {
             proof_id,
             status: "completed".to_string(),
-            proof: Some(ProofData {
-                journal: journal_hex,
-                seal,
-                image_id: image_id.to_string(),
-            }),
+            proof: Some(proof_data),
         })
     }
 
     async fn submit_bonsai_proof(
         &self,
         proof_id: String,
-        proof_type: &str,
         input_data: serde_json::Value,
     ) -> Result<ProofResponse> {
         let api_key = self.bonsai_api_key.as_ref()
             .ok_or_else(|| anyhow!("Bonsai API key not configured"))?;
-        let api_url = self.bonsai_api_url.as_ref()
-            .ok_or_else(|| anyhow!("Bonsai API URL not configured"))?;
 
-        info!("Submitting {} proof to Bonsai: {}", proof_type, proof_id);
+        info!("Submitting proof to Bonsai: {}", proof_id);
 
-        // In a full implementation, we would:
-        // 1. Upload the guest program (ELF) if not already uploaded
-        // 2. Upload the input data
-        // 3. Create a session
-        // 4. Poll for completion
-        // 5. Download the receipt
+        // Use the blocking Bonsai SDK client
+        // The SDK requires a risc0_zkvm version string
+        let risc0_version = "1.4.0"; // Match the bonsai-sdk version
 
-        // For now, use the Bonsai SDK directly
         let client = bonsai_sdk::blocking::Client::from_parts(
-            api_url.clone(),
+            self.bonsai_api_url.clone(),
             api_key.clone(),
-            risc0_zkvm::VERSION,
+            risc0_version,
         )?;
 
         // Serialize input
         let input_bytes = serde_json::to_vec(&input_data)?;
 
-        // Upload input
+        // Upload input data
         let input_id = client.upload_input(input_bytes)?;
-        info!("Uploaded input: {}", input_id);
+        info!("Uploaded input to Bonsai: {}", input_id);
 
-        // For a real implementation, we'd need to:
-        // 1. Compile a guest program that verifies the shielded action constraints
-        // 2. Upload that program
-        // 3. Create a session with the program and input
+        // For a complete implementation, we would need:
+        // 1. A compiled guest program (ELF) that implements the shielded action verification
+        // 2. Upload that program with client.upload_img()
+        // 3. Create a session with client.create_session()
+        // 4. Poll for completion with session.status()
+        // 5. Download the receipt
 
-        // Since we don't have the guest program compiled, return a pending status
+        // For now, store as pending and return
+        let mut proofs = self.proofs.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+        proofs.insert(proof_id.clone(), ProofSession {
+            session_id: input_id.clone(),
+            status: "pending".to_string(),
+            proof: None,
+        });
+
         Ok(ProofResponse {
             proof_id,
             status: "pending".to_string(),
@@ -252,7 +273,18 @@ impl ProverService {
     }
 
     async fn check_bonsai_status(&self, proof_id: &str) -> Result<ProofResponse> {
-        // In a full implementation, we would poll the Bonsai session status
+        let proofs = self.proofs.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+
+        if let Some(session) = proofs.get(proof_id) {
+            // In a full implementation, we would poll Bonsai for the session status
+            // using client.session_status(&session.session_id)
+            return Ok(ProofResponse {
+                proof_id: proof_id.to_string(),
+                status: session.status.clone(),
+                proof: session.proof.clone(),
+            });
+        }
+
         Err(anyhow!("Proof not found: {}", proof_id))
     }
 }

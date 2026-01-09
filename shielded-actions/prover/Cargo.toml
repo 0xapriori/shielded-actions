@@ -13,9 +13,8 @@ tower-http = { version = "0.6", features = ["cors"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Boundless/Bonsai SDK
+# Bonsai SDK for RISC Zero proof generation
 bonsai-sdk = "1.4"
-risc0-zkvm = "1.4"
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json"] }
