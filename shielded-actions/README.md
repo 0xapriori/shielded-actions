@@ -57,7 +57,7 @@ A complete implementation of privacy-preserving token swaps using the [Anoma Pro
 
 The frontend is deployed on GitHub Pages and connects to the Elixir backend for proof generation.
 
-**Frontend**: [https://your-username.github.io/shielded-actions/](https://your-username.github.io/shielded-actions/)
+**Frontend**: [https://0xapriori.github.io/shielded-actions/](https://0xapriori.github.io/shielded-actions/)
 
 ## Running Locally
 
