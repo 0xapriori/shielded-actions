@@ -1,8 +1,8 @@
 # Build stage
 FROM hexpm/elixir:1.17.3-erlang-27.1.2-alpine-3.20.3 AS build
 
-# Install build dependencies
-RUN apk add --no-cache build-base git
+# Install build dependencies including Rust for NIFs
+RUN apk add --no-cache build-base git rust cargo
 
 WORKDIR /app
 
@@ -12,6 +12,8 @@ RUN mix local.hex --force && \
 
 # Set build ENV
 ENV MIX_ENV=prod
+# Force building native code (don't use precompiled)
+ENV BUILD_NATIVE=true
 
 # Install mix dependencies
 COPY mix.exs mix.lock ./
