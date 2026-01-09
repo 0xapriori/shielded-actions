@@ -1,8 +1,12 @@
 # Build stage
 FROM hexpm/elixir:1.17.3-erlang-27.1.2-alpine-3.20.3 AS build
 
-# Install build dependencies including Rust for NIFs
-RUN apk add --no-cache build-base git rust cargo
+# Install build dependencies
+RUN apk add --no-cache build-base git curl
+
+# Install Rust via rustup (need nightly for edition2024)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /app
 
