@@ -1,5 +1,5 @@
 # Build stage - use Debian for better Rust compilation support
-FROM hexpm/elixir:1.17.3-erlang-27.1.2-debian-bookworm-20240904 AS build
+FROM hexpm/elixir:1.17.1-erlang-27.1.1-debian-bookworm-20251229 AS build
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
