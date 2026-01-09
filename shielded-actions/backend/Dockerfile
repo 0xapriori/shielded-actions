@@ -1,12 +1,23 @@
-# Build stage
-FROM hexpm/elixir:1.17.3-erlang-27.1.2-alpine-3.20.3 AS build
+# Build stage - use Debian for better Rust compilation support
+FROM hexpm/elixir:1.17.3-erlang-27.1.2-debian-bookworm-20240904 AS build
 
 # Install build dependencies
-RUN apk add --no-cache build-base git curl
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    curl \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install Rust via rustup (need nightly for edition2024)
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
 ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Optimize Rust compilation for limited memory environments
+ENV CARGO_BUILD_JOBS=2
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+ENV RUSTFLAGS="-C codegen-units=1"
 
 WORKDIR /app
 
@@ -19,13 +30,17 @@ ENV MIX_ENV=prod
 # Force building native code (don't use precompiled)
 ENV BUILD_NATIVE=true
 
-# Install mix dependencies
+# Install mix dependencies first (better caching)
 COPY mix.exs mix.lock ./
 RUN mix deps.get --only prod
+
+# Create config directory
 RUN mkdir config
 
 # Copy config files
 COPY config/config.exs config/prod.exs config/runtime.exs config/
+
+# Compile dependencies separately (better error visibility)
 RUN mix deps.compile
 
 # Copy application code
@@ -37,18 +52,30 @@ RUN mix compile
 # Build release
 RUN mix release
 
-# Runtime stage
-FROM alpine:3.20.3 AS app
+# Runtime stage - use slim Debian for smaller image
+FROM debian:bookworm-slim AS app
 
-RUN apk add --no-cache libstdc++ openssl ncurses-libs
+RUN apt-get update && apt-get install -y \
+    libstdc++6 \
+    openssl \
+    libncurses6 \
+    locales \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set locale
+RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
+ENV LANG=en_US.UTF-8
+ENV LANGUAGE=en_US:en
+ENV LC_ALL=en_US.UTF-8
 
 WORKDIR /app
 
-RUN chown nobody:nobody /app
+RUN useradd --create-home app
+RUN chown app:app /app
 
-USER nobody:nobody
+USER app
 
-COPY --from=build --chown=nobody:nobody /app/_build/prod/rel/backend ./
+COPY --from=build --chown=app:app /app/_build/prod/rel/backend ./
 
 ENV HOME=/app
 ENV MIX_ENV=prod

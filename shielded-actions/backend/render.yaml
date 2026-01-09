@@ -3,7 +3,7 @@ services:
     name: shielded-actions-backend
     runtime: docker
     region: oregon
-    plan: free
+    plan: starter
     healthCheckPath: /health
     envVars:
       - key: PORT
