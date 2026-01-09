@@ -9,7 +9,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{info, error};
+use tracing::info;
 
 mod prover;
 
@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/prove/shield", post(prove_shield))
         .route("/api/prove/swap", post(prove_swap))
         .route("/api/prove/unshield", post(prove_unshield))
-        .route("/api/status/{proof_id}", get(proof_status))
+        .route("/api/status/:proof_id", get(proof_status))
         .layer(cors)
         .with_state(state);
 
@@ -165,8 +165,8 @@ async fn prove_unshield(
 
 // Proof status check
 async fn proof_status(
-    Path(proof_id): Path<String>,
     State(state): State<AppState>,
+    Path(proof_id): Path<String>,
 ) -> Result<Json<ProofResponse>, AppError> {
     let prover = state.prover.read().await;
 
