@@ -40,7 +40,7 @@ jobs:
         working-directory: shielded-actions/frontend
         env:
           GITHUB_PAGES: true
-          VITE_API_URL: ${{ vars.BACKEND_API_URL || 'http://localhost:4000' }}
+          VITE_API_URL: https://shielded-actions.onrender.com
         run: npm run build
 
       - name: Setup Pages
