@@ -148,8 +148,8 @@ async fn prove_unshield(
 
 // Proof status check
 async fn proof_status(
-    State(state): State<AppState>,
     axum::extract::Path(proof_id): axum::extract::Path<String>,
+    State(state): State<AppState>,
 ) -> Result<Json<ProofResponse>, (StatusCode, String)> {
     let prover = state.prover.read().await;
 
