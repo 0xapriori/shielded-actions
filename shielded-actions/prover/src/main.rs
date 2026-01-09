@@ -4,7 +4,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
@@ -12,7 +12,7 @@ use tracing::{info, error};
 
 mod prover;
 
-use prover::ProverService;
+use prover::{ProverService, ProofResponse};
 
 #[derive(Clone)]
 struct AppState {
@@ -76,20 +76,6 @@ struct ShieldProofRequest {
     amount: String,
     sender: String,
     nullifier_key: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ProofResponse {
-    proof_id: String,
-    status: String,
-    proof: Option<ProofData>,
-}
-
-#[derive(Debug, Serialize)]
-struct ProofData {
-    journal: String,
-    seal: String,
-    image_id: String,
 }
 
 async fn prove_shield(

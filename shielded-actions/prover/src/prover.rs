@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 
 /// Proof response structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
