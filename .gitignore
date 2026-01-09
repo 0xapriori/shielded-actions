@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+shielded-actions/frontend/node_modules/
+shielded-actions/backend/deps/
+shielded-actions/backend/_build/
+
+# Build outputs
+shielded-actions/frontend/dist/
+shielded-actions/out/
+shielded-actions/cache/
+
+# Environment files
+.env
+.env.local
+shielded-actions/backend/.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Foundry
+shielded-actions/broadcast/
+shielded-actions/lib/
+
+# Elixir
+*.beam
+*.ez
+erl_crash.dump
+
+# Source directory (cloned during setup)
+anoma-pa-source/

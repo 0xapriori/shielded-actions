@@ -1,0 +1,43 @@
+# Compiler files
+cache/
+out/
+
+# Ignores development broadcast logs
+broadcast/
+!/broadcast/DeployShieldedActions.s.sol/
+
+# Docs
+docs/
+
+# Dotenv file
+.env
+
+# Node modules (for frontend)
+node_modules/
+
+# Frontend build
+frontend/dist/
+frontend/build/
+frontend/.next/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+coverage/
+lcov.info
+
+# Foundry
+cache/
+out/
+
+# Keep broadcast records for deployed contracts
+!broadcast/**/run-latest.json
