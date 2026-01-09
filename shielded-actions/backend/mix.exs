@@ -38,14 +38,8 @@ defmodule Backend.MixProject do
       # HTTP client
       {:req, "~> 0.5"},
 
-      # Ethereum interaction
-      {:ethereumex, "~> 0.10"},
-      {:ex_keccak, "~> 0.7"},
-      {:ex_rlp, "~> 0.6"},
-      {:ex_secp256k1, "~> 0.7"},
-
-      # Anoma SDK (for proof generation)
-      {:anoma_sdk, github: "anoma/anoma-sdk", branch: "main"},
+      # HTTP client for Boundless API calls
+      {:httpoison, "~> 2.2"},
 
       # Environment variables
       {:dotenvy, "~> 0.9"}

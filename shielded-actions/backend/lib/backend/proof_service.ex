@@ -1,16 +1,11 @@
 defmodule Backend.ProofService do
   @moduledoc """
   Service for generating Anoma Resource Machine proofs.
-  Handles shield, swap, and unshield operations using the Anoma SDK.
-  """
 
-  alias AnomaSDK.Arm
-  alias AnomaSDK.Arm.Action
-  alias AnomaSDK.Arm.ComplianceWitness
-  alias AnomaSDK.Arm.DeltaWitness
-  alias AnomaSDK.Arm.NullifierKey
-  alias AnomaSDK.Arm.Resource
-  alias AnomaSDK.Arm.Transaction
+  NOTE: This is a mock implementation that returns placeholder proofs.
+  For production use with real ZK proofs, integrate with Boundless or
+  run on a server with sufficient resources to compile the full Anoma SDK.
+  """
 
   # Contract addresses on Sepolia
   @contracts %{
@@ -34,18 +29,15 @@ defmodule Backend.ProofService do
   """
   @spec generate_keypair() :: {:ok, map()} | {:error, String.t()}
   def generate_keypair do
-    try do
-      keypair = Arm.random_key_pair()
+    # Generate random 32-byte keys
+    private_key = :crypto.strong_rand_bytes(32)
+    public_key = :crypto.hash(:sha256, private_key)
 
-      {:ok,
-       %{
-         private_key: Base.encode16(keypair.secret_key, case: :lower),
-         public_key: Base.encode16(keypair.public_key, case: :lower)
-       }}
-    rescue
-      e ->
-        {:error, "Failed to generate keypair: #{inspect(e)}"}
-    end
+    {:ok,
+     %{
+       private_key: Base.encode16(private_key, case: :lower),
+       public_key: Base.encode16(public_key, case: :lower)
+     }}
   end
 
   @doc """
@@ -65,58 +57,38 @@ defmodule Backend.ProofService do
       decimals = Map.get(@token_decimals, String.upcase(token), 18)
       amount_wei = parse_amount(amount, decimals)
 
-      # Create the resource that will be created (shielded token)
-      nk_commitment = NullifierKey.commit(nullifier_key)
+      # Create mock resource data
+      nonce = :crypto.strong_rand_bytes(32)
+      rand_seed = :crypto.strong_rand_bytes(32)
+      nk_commitment = :crypto.hash(:sha256, nullifier_key)
 
-      created_resource = %Resource{
-        logic_ref: hash_logic_ref(forwarder_address),
-        label_ref: hash_label_ref(token),
+      resource = %{
+        logic_ref: Base.encode16(hash_logic_ref(forwarder_address), case: :lower),
+        label_ref: Base.encode16(hash_label_ref(token), case: :lower),
         quantity: amount_wei,
-        value_ref: hash_value_ref(sender),
+        value_ref: Base.encode16(hash_value_ref(sender), case: :lower),
         is_ephemeral: false,
-        nonce: :crypto.strong_rand_bytes(32),
-        nk_commitment: nk_commitment,
-        rand_seed: :crypto.strong_rand_bytes(32)
+        nonce: Base.encode16(nonce, case: :lower),
+        nk_commitment: Base.encode16(nk_commitment, case: :lower),
+        rand_seed: Base.encode16(rand_seed, case: :lower)
       }
 
-      # Create a "zero" consumed resource for shielding (minting new resource)
-      consumed_resource = create_zero_resource(nk_commitment)
+      # Compute resource commitment (mock)
+      resource_commitment = :crypto.hash(:sha256, :erlang.term_to_binary(resource))
 
-      # Build the compliance witness
-      compliance_witness =
-        ComplianceWitness.with_fixed_rcv(consumed_resource, nullifier_key, created_resource)
-
-      # Generate compliance proof
-      compliance_unit = Arm.prove_compliance_witness(compliance_witness)
-
-      # Build the action
-      action = %Action{
-        compliance_units: [compliance_unit],
-        logic_verifier_inputs: []
-      }
-
-      # Build the delta witness (for signing)
-      delta_witness = %DeltaWitness{
-        signing_key: nullifier_key
-      }
-
-      # Build the transaction
-      transaction = %Transaction{
-        actions: [action],
-        delta_proof: {:witness, delta_witness}
-      }
-
-      # Generate the delta proof
-      transaction_with_proof = Transaction.generate_delta_proof(transaction)
-
-      # Compute the resource commitment for tracking
-      resource_commitment = Resource.commitment(created_resource)
+      # Generate mock proof data
+      mock_proof = generate_mock_proof()
 
       {:ok,
        %{
-         transaction: encode_transaction(transaction_with_proof),
+         transaction: Jason.encode!(%{
+           actions: [%{compliance_units: [mock_proof]}],
+           delta_proof: mock_proof,
+           mock: true,
+           note: "This is a mock proof. Real ZK proofs require Anoma SDK or Boundless integration."
+         }),
          resource_commitment: Base.encode16(resource_commitment, case: :lower),
-         resource: encode_resource(created_resource),
+         resource: resource,
          forwarder_call: %{
            to: forwarder_address,
            data: encode_shield_call(sender, amount_wei)
@@ -138,71 +110,51 @@ defmodule Backend.ProofService do
       # Parse the nullifier key
       nullifier_key = decode_hex(nullifier_key_hex)
 
-      # Decode the input resource
-      input_resource = Resource.from_map(atomize_keys(input_resource_map))
-
       # Parse min amount out
       output_decimals = Map.get(@token_decimals, String.upcase(output_token), 18)
       min_amount_wei = parse_amount(min_amount_out, output_decimals)
 
-      # Create the output resource (new shielded token after swap)
-      nk_commitment = NullifierKey.commit(nullifier_key)
+      # Get input amount from resource
+      input_amount = input_resource_map["quantity"] || input_resource_map[:quantity] || 0
 
+      # Create mock output resource
+      nonce = :crypto.strong_rand_bytes(32)
+      rand_seed = :crypto.strong_rand_bytes(32)
+      nk_commitment = :crypto.hash(:sha256, nullifier_key)
       output_forwarder = get_forwarder_address(output_token)
 
-      created_resource = %Resource{
-        logic_ref: hash_logic_ref(output_forwarder),
-        label_ref: hash_label_ref(output_token),
+      output_resource = %{
+        logic_ref: Base.encode16(hash_logic_ref(output_forwarder), case: :lower),
+        label_ref: Base.encode16(hash_label_ref(output_token), case: :lower),
         quantity: min_amount_wei,
-        value_ref: input_resource.value_ref,
+        value_ref: input_resource_map["value_ref"] || input_resource_map[:value_ref] || Base.encode16(<<0::256>>, case: :lower),
         is_ephemeral: false,
-        nonce: :crypto.strong_rand_bytes(32),
-        nk_commitment: nk_commitment,
-        rand_seed: :crypto.strong_rand_bytes(32)
+        nonce: Base.encode16(nonce, case: :lower),
+        nk_commitment: Base.encode16(nk_commitment, case: :lower),
+        rand_seed: Base.encode16(rand_seed, case: :lower)
       }
 
-      # Build the compliance witness
-      compliance_witness =
-        ComplianceWitness.with_fixed_rcv(input_resource, nullifier_key, created_resource)
+      # Compute nullifier and commitment (mock)
+      nullifier = :crypto.hash(:sha256, :erlang.term_to_binary({input_resource_map, nullifier_key}))
+      resource_commitment = :crypto.hash(:sha256, :erlang.term_to_binary(output_resource))
 
-      # Generate compliance proof
-      compliance_unit = Arm.prove_compliance_witness(compliance_witness)
-
-      # Build the action
-      action = %Action{
-        compliance_units: [compliance_unit],
-        logic_verifier_inputs: []
-      }
-
-      # Build the delta witness
-      delta_witness = %DeltaWitness{
-        signing_key: nullifier_key
-      }
-
-      # Build the transaction
-      transaction = %Transaction{
-        actions: [action],
-        delta_proof: {:witness, delta_witness}
-      }
-
-      # Generate the delta proof
-      transaction_with_proof = Transaction.generate_delta_proof(transaction)
-
-      # Compute nullifier of consumed resource
-      nullifier = Resource.nullifier(input_resource, nullifier_key)
-
-      # Compute the new resource commitment
-      resource_commitment = Resource.commitment(created_resource)
+      # Generate mock proof
+      mock_proof = generate_mock_proof()
 
       {:ok,
        %{
-         transaction: encode_transaction(transaction_with_proof),
+         transaction: Jason.encode!(%{
+           actions: [%{compliance_units: [mock_proof]}],
+           delta_proof: mock_proof,
+           mock: true,
+           note: "This is a mock proof. Real ZK proofs require Anoma SDK or Boundless integration."
+         }),
          nullifier: Base.encode16(nullifier, case: :lower),
          new_resource_commitment: Base.encode16(resource_commitment, case: :lower),
-         new_resource: encode_resource(created_resource),
+         new_resource: output_resource,
          uniswap_call: %{
            to: @contracts.uniswap_forwarder,
-           data: encode_swap_call(input_resource.quantity, min_amount_wei, output_token)
+           data: encode_swap_call(input_amount, min_amount_wei, output_token)
          }
        }}
     rescue
@@ -221,62 +173,33 @@ defmodule Backend.ProofService do
       # Parse the nullifier key
       nullifier_key = decode_hex(nullifier_key_hex)
 
-      # Decode the resource
-      resource = Resource.from_map(atomize_keys(resource_map))
+      # Get amount from resource
+      amount = resource_map["quantity"] || resource_map[:quantity] || 0
 
-      # Verify the nullifier key matches the resource
-      computed_commitment = NullifierKey.commit(nullifier_key)
+      # Compute nullifier (mock)
+      nullifier = :crypto.hash(:sha256, :erlang.term_to_binary({resource_map, nullifier_key}))
 
-      if resource.nk_commitment != computed_commitment do
-        {:error, "Nullifier key does not match resource commitment"}
-      else
-        # Create a "zero" output resource (burning the shielded resource)
-        nk_commitment = NullifierKey.commit(nullifier_key)
-        zero_resource = create_zero_resource(nk_commitment)
+      # Determine the forwarder from the resource logic_ref
+      logic_ref = resource_map["logic_ref"] || resource_map[:logic_ref]
+      forwarder_address = decode_forwarder_from_logic_ref(logic_ref)
 
-        # Build the compliance witness
-        compliance_witness =
-          ComplianceWitness.with_fixed_rcv(resource, nullifier_key, zero_resource)
+      # Generate mock proof
+      mock_proof = generate_mock_proof()
 
-        # Generate compliance proof
-        compliance_unit = Arm.prove_compliance_witness(compliance_witness)
-
-        # Build the action
-        action = %Action{
-          compliance_units: [compliance_unit],
-          logic_verifier_inputs: []
-        }
-
-        # Build the delta witness
-        delta_witness = %DeltaWitness{
-          signing_key: nullifier_key
-        }
-
-        # Build the transaction
-        transaction = %Transaction{
-          actions: [action],
-          delta_proof: {:witness, delta_witness}
-        }
-
-        # Generate the delta proof
-        transaction_with_proof = Transaction.generate_delta_proof(transaction)
-
-        # Compute nullifier
-        nullifier = Resource.nullifier(resource, nullifier_key)
-
-        # Determine the forwarder from the resource logic_ref
-        forwarder_address = decode_forwarder_from_logic_ref(resource.logic_ref)
-
-        {:ok,
-         %{
-           transaction: encode_transaction(transaction_with_proof),
-           nullifier: Base.encode16(nullifier, case: :lower),
-           forwarder_call: %{
-             to: forwarder_address,
-             data: encode_unshield_call(recipient, resource.quantity)
-           }
-         }}
-      end
+      {:ok,
+       %{
+         transaction: Jason.encode!(%{
+           actions: [%{compliance_units: [mock_proof]}],
+           delta_proof: mock_proof,
+           mock: true,
+           note: "This is a mock proof. Real ZK proofs require Anoma SDK or Boundless integration."
+         }),
+         nullifier: Base.encode16(nullifier, case: :lower),
+         forwarder_call: %{
+           to: forwarder_address,
+           data: encode_unshield_call(recipient, amount)
+         }
+       }}
     rescue
       e ->
         {:error, "Failed to create unshield transaction: #{inspect(e)}"}
@@ -332,34 +255,10 @@ defmodule Backend.ProofService do
     :crypto.hash(:sha256, owner)
   end
 
-  defp create_zero_resource(nk_commitment) do
-    %Resource{
-      logic_ref: <<0::256>>,
-      label_ref: <<0::256>>,
-      quantity: 0,
-      value_ref: <<0::256>>,
-      is_ephemeral: true,
-      nonce: <<0::256>>,
-      nk_commitment: nk_commitment,
-      rand_seed: <<0::256>>
-    }
-  end
-
-  defp encode_transaction(transaction) do
-    Jason.encode!(transaction)
-  end
-
-  defp encode_resource(resource) do
-    %{
-      logic_ref: Base.encode16(resource.logic_ref, case: :lower),
-      label_ref: Base.encode16(resource.label_ref, case: :lower),
-      quantity: resource.quantity,
-      value_ref: Base.encode16(resource.value_ref, case: :lower),
-      is_ephemeral: resource.is_ephemeral,
-      nonce: Base.encode16(resource.nonce, case: :lower),
-      nk_commitment: Base.encode16(resource.nk_commitment, case: :lower),
-      rand_seed: Base.encode16(resource.rand_seed, case: :lower)
-    }
+  defp generate_mock_proof do
+    # Generate random bytes to simulate a proof
+    proof_bytes = :crypto.strong_rand_bytes(64)
+    Base.encode16(proof_bytes, case: :lower)
   end
 
   # Encode the ERC20 transferFrom call for shielding
@@ -421,10 +320,10 @@ defmodule Backend.ProofService do
     "0x" <> selector <> amount_in_hex <> amount_out_hex <> token_padded
   end
 
-  defp decode_forwarder_from_logic_ref(logic_ref) do
+  defp decode_forwarder_from_logic_ref(logic_ref) when is_binary(logic_ref) do
     # Try to match against known forwarder hashes
-    weth_hash = hash_logic_ref(@contracts.weth_forwarder)
-    usdc_hash = hash_logic_ref(@contracts.usdc_forwarder)
+    weth_hash = Base.encode16(hash_logic_ref(@contracts.weth_forwarder), case: :lower)
+    usdc_hash = Base.encode16(hash_logic_ref(@contracts.usdc_forwarder), case: :lower)
 
     cond do
       logic_ref == weth_hash -> @contracts.weth_forwarder
@@ -433,13 +332,5 @@ defmodule Backend.ProofService do
     end
   end
 
-  defp atomize_keys(map) when is_map(map) do
-    Map.new(map, fn
-      {k, v} when is_binary(k) -> {String.to_atom(k), atomize_keys(v)}
-      {k, v} -> {k, atomize_keys(v)}
-    end)
-  end
-
-  defp atomize_keys(list) when is_list(list), do: Enum.map(list, &atomize_keys/1)
-  defp atomize_keys(value), do: value
+  defp decode_forwarder_from_logic_ref(_), do: @contracts.weth_forwarder
 end
