@@ -34,7 +34,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: shielded-actions/frontend
-        run: npm ci
+        run: npm install --legacy-peer-deps
 
       - name: Build
         working-directory: shielded-actions/frontend
