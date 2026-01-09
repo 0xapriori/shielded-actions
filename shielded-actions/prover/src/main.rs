@@ -68,7 +68,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/prove/shield", post(prove_shield))
         .route("/api/prove/swap", post(prove_swap))
         .route("/api/prove/unshield", post(prove_unshield))
-        .route("/api/status/:proof_id", get(proof_status))
         .layer(cors)
         .with_state(state);
 
