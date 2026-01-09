@@ -8,8 +8,13 @@ defmodule Backend.Application do
 
   @impl true
   def start(_type, _args) do
-    # Load environment variables from .env file if present
-    Dotenvy.source([".env", System.get_env()])
+    # Load environment variables from .env file if present (only in dev)
+    # In production releases, environment variables are set by the deployment platform
+    try do
+      Dotenvy.source([".env", System.get_env()])
+    rescue
+      _ -> :ok
+    end
 
     port = String.to_integer(System.get_env("PORT") || "4000")
 
