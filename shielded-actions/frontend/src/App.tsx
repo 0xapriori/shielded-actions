@@ -659,7 +659,7 @@ function App() {
       <footer style={styles.footer}>
         <p>Built with Anoma Protocol Adapter + Uniswap V3</p>
         <p style={styles.footerNote}>
-          Backend API: {api.API_BASE_URL}
+          Prover: {api.PROVER_URL}
         </p>
       </footer>
     </div>
