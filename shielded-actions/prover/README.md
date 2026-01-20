@@ -148,3 +148,4 @@ cast send 0x08c3bdc46B115cDc71Df076d9De96EeEBaa98525 \
 - `evm_protocol_adapter_bindings` - EVM ABI encoding
 - `risc0-zkvm` - ZK proof generation
 - `bonsai-sdk` - Remote proving (optional)
+# Trigger redeploy
