@@ -1,0 +1,15 @@
+[package]
+name = "forwarder-logic-witness"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+prove = ["arm/prove"]
+
+[dependencies]
+arm = { git = "https://github.com/anoma/arm-risc0.git", tag = "v0.13.0", package = "arm", default-features = false }
+risc0-zkvm = { version = "=3.0.3", default-features = false }
+serde = { version = "1", features = ["derive"] }
+once_cell = "1"
+hex = "0.4"

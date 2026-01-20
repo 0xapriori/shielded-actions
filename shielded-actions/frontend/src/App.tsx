@@ -1,11 +1,14 @@
 import { useState, useEffect } from 'react'
 import { ConnectButton } from '@rainbow-me/rainbowkit'
-import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi'
-import { formatUnits, parseUnits } from 'viem'
+import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt, useSendTransaction } from 'wagmi'
+import { formatUnits, parseUnits, type Hex } from 'viem'
 import { CONTRACTS, ERC20_ABI, ERC20_FORWARDER_ABI } from './contracts'
 import * as api from './api'
 
 type Token = 'WETH' | 'USDC'
+
+// Transaction execution states
+type TxState = 'idle' | 'pending' | 'generating' | 'generating_proof' | 'awaiting_signature' | 'confirming' | 'success' | 'error'
 
 const TOKENS: Record<Token, { address: `0x${string}`; forwarder: `0x${string}`; decimals: number; symbol: string }> = {
   WETH: { address: CONTRACTS.WETH, forwarder: CONTRACTS.WETH_FORWARDER, decimals: 18, symbol: 'WETH' },
@@ -23,6 +26,8 @@ function App() {
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [backendStatus, setBackendStatus] = useState<'checking' | 'online' | 'offline'>('checking')
+  const [txState, setTxState] = useState<TxState>('idle')
+  const [proofTxHash, setProofTxHash] = useState<Hex | undefined>(undefined)
 
   const token = TOKENS[selectedToken]
 
@@ -53,8 +58,8 @@ function App() {
     query: { enabled: !!address }
   })
 
-  // Read allowance
-  const { data: allowance } = useReadContract({
+  // Read allowance - refetch after approval
+  const { data: allowance, refetch: refetchAllowance } = useReadContract({
     address: token.address,
     abi: ERC20_ABI,
     functionName: 'allowance',
@@ -69,9 +74,35 @@ function App() {
     functionName: 'getBalance',
   })
 
-  // Write contracts
+  // Write contracts (for approve)
   const { writeContract, data: txHash, isPending } = useWriteContract()
   const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({ hash: txHash })
+
+  // Send raw transaction (for proof execution)
+  const { sendTransaction, data: proofSentHash } = useSendTransaction()
+  const { isSuccess: isProofSuccess } = useWaitForTransactionReceipt({ hash: proofTxHash })
+
+  // Update proofTxHash when transaction is sent
+  useEffect(() => {
+    if (proofSentHash) {
+      setProofTxHash(proofSentHash)
+      setTxState('confirming')
+    }
+  }, [proofSentHash])
+
+  // Update state when proof tx confirms
+  useEffect(() => {
+    if (isProofSuccess && proofTxHash) {
+      setTxState('success')
+    }
+  }, [isProofSuccess, proofTxHash])
+
+  // Refetch allowance after approval transaction succeeds
+  useEffect(() => {
+    if (isSuccess && txHash) {
+      refetchAllowance()
+    }
+  }, [isSuccess, txHash, refetchAllowance])
 
   const handleApprove = () => {
     const amountWei = parseUnits(amount || '0', token.decimals)
@@ -104,26 +135,62 @@ function App() {
     }
   }
 
+  // Execute proof on-chain via Protocol Adapter
+  const executeProofOnChain = async (calldata: string) => {
+    setTxState('awaiting_signature')
+    try {
+      // Send transaction to Protocol Adapter with the proof calldata
+      sendTransaction({
+        to: CONTRACTS.PROTOCOL_ADAPTER as Hex,
+        data: calldata as Hex,
+        gas: BigInt(1500000), // Set higher gas limit for ZK proof verification
+      })
+    } catch (e) {
+      setTxState('error')
+      throw e
+    }
+  }
+
   // Shield tokens
   const handleShield = async () => {
     if (!keypair || !address || !amount) return
 
     setIsLoading(true)
     setError(null)
+    setTxState('pending')
+    setProofTxHash(undefined)
+
     try {
-      const result = await api.createShieldTransaction({
-        token: selectedToken,
-        amount,
-        sender: address,
-        nullifier_key: keypair.private_key,
-      })
+      const result = await api.createShieldTransaction(
+        {
+          token: selectedToken,
+          amount,
+          sender: address,
+          nullifier_key: keypair.private_key,
+        },
+        // Status update callback - updates UI as proof generates
+        (status) => {
+          if (status === 'generating') {
+            setTxState('generating')
+          } else if (status === 'pending') {
+            setTxState('pending')
+          }
+        }
+      )
 
       // Store the resource locally
       api.storeResource(result.resource)
       setShieldedResources(api.getStoredResources())
 
-      alert(`Shield transaction created!\n\nResource commitment: ${result.resource_commitment}\n\nNote: In production, this would execute the transaction via the Protocol Adapter.`)
+      // If we have calldata, execute on-chain
+      if (result.calldata) {
+        await executeProofOnChain(result.calldata)
+      } else {
+        setTxState('idle')
+        alert(`Shield transaction created!\n\nResource commitment: ${result.resource_commitment}`)
+      }
     } catch (e) {
+      setTxState('error')
       setError(e instanceof Error ? e.message : 'Failed to create shield transaction')
     } finally {
       setIsLoading(false)
@@ -136,14 +203,23 @@ function App() {
 
     setIsLoading(true)
     setError(null)
+    setTxState('pending')
+    setProofTxHash(undefined)
+
     try {
       const outputToken = selectedToken === 'WETH' ? 'USDC' : 'WETH'
-      const result = await api.createSwapTransaction({
-        input_resource: selectedResource,
-        output_token: outputToken,
-        nullifier_key: keypair.private_key,
-        min_amount_out: amount,
-      })
+      const result = await api.createSwapTransaction(
+        {
+          input_resource: selectedResource,
+          output_token: outputToken,
+          nullifier_key: keypair.private_key,
+          min_amount_out: amount,
+        },
+        (status) => {
+          if (status === 'generating') setTxState('generating')
+          else if (status === 'pending') setTxState('pending')
+        }
+      )
 
       // Update local resources
       api.removeResource(selectedResource.nonce)
@@ -151,8 +227,15 @@ function App() {
       setShieldedResources(api.getStoredResources())
       setSelectedResource(null)
 
-      alert(`Swap transaction created!\n\nNullifier: ${result.nullifier}\nNew commitment: ${result.new_resource_commitment}\n\nNote: In production, this would execute the swap via the Protocol Adapter.`)
+      // If we have calldata, execute on-chain
+      if (result.calldata) {
+        await executeProofOnChain(result.calldata)
+      } else {
+        setTxState('idle')
+        alert(`Swap transaction created!\n\nNullifier: ${result.nullifier}\nNew commitment: ${result.new_resource_commitment}`)
+      }
     } catch (e) {
+      setTxState('error')
       setError(e instanceof Error ? e.message : 'Failed to create swap transaction')
     } finally {
       setIsLoading(false)
@@ -165,24 +248,47 @@ function App() {
 
     setIsLoading(true)
     setError(null)
+    setTxState('pending')
+    setProofTxHash(undefined)
+
     try {
-      const result = await api.createUnshieldTransaction({
-        resource: selectedResource,
-        recipient: address,
-        nullifier_key: keypair.private_key,
-      })
+      const result = await api.createUnshieldTransaction(
+        {
+          resource: selectedResource,
+          recipient: address,
+          nullifier_key: keypair.private_key,
+        },
+        (status) => {
+          if (status === 'generating') setTxState('generating')
+          else if (status === 'pending') setTxState('pending')
+        }
+      )
 
       // Remove the resource from local storage
       api.removeResource(selectedResource.nonce)
       setShieldedResources(api.getStoredResources())
       setSelectedResource(null)
 
-      alert(`Unshield transaction created!\n\nNullifier: ${result.nullifier}\n\nNote: In production, this would execute the withdrawal via the Protocol Adapter.`)
+      // If we have calldata, execute on-chain
+      if (result.calldata) {
+        await executeProofOnChain(result.calldata)
+      } else {
+        setTxState('idle')
+        alert(`Unshield transaction created!\n\nNullifier: ${result.nullifier}`)
+      }
     } catch (e) {
+      setTxState('error')
       setError(e instanceof Error ? e.message : 'Failed to create unshield transaction')
     } finally {
       setIsLoading(false)
     }
+  }
+
+  // Reset transaction state
+  const resetTxState = () => {
+    setTxState('idle')
+    setProofTxHash(undefined)
+    setError(null)
   }
 
   return (
@@ -309,10 +415,16 @@ function App() {
                 ) : (
                   <button
                     onClick={handleShield}
-                    disabled={!amount || isLoading || backendStatus !== 'online'}
+                    disabled={!amount || isLoading || backendStatus !== 'online' || txState !== 'idle'}
                     style={styles.button}
                   >
-                    {isLoading ? 'Creating Proof...' : `Shield ${amount || '0'} ${token.symbol}`}
+                    {txState === 'pending' ? 'Starting Proof...' :
+                     txState === 'generating' ? 'Generating ZK Proof (~7 min)...' :
+                     txState === 'generating_proof' ? 'Generating Proof...' :
+                     txState === 'awaiting_signature' ? 'Confirm in Wallet...' :
+                     txState === 'confirming' ? 'Confirming...' :
+                     isLoading ? 'Creating Proof...' :
+                     `Shield ${amount || '0'} ${token.symbol}`}
                   </button>
                 )}
               </div>
@@ -359,10 +471,16 @@ function App() {
 
                 <button
                   onClick={handleSwap}
-                  disabled={!selectedResource || !keypair || isLoading || backendStatus !== 'online'}
+                  disabled={!selectedResource || !keypair || isLoading || backendStatus !== 'online' || txState !== 'idle'}
                   style={styles.button}
                 >
-                  {isLoading ? 'Creating Proof...' : `Swap Shielded ${amount || '0'} ${token.symbol}`}
+                  {txState === 'pending' ? 'Starting Proof...' :
+                   txState === 'generating' ? 'Generating ZK Proof (~7 min)...' :
+                   txState === 'generating_proof' ? 'Generating Proof...' :
+                   txState === 'awaiting_signature' ? 'Confirm in Wallet...' :
+                   txState === 'confirming' ? 'Confirming...' :
+                   isLoading ? 'Creating Proof...' :
+                   `Swap Shielded ${amount || '0'} ${token.symbol}`}
                 </button>
               </div>
             )}
@@ -407,17 +525,24 @@ function App() {
 
                 <button
                   onClick={handleUnshield}
-                  disabled={!selectedResource || !keypair || isLoading || backendStatus !== 'online'}
+                  disabled={!selectedResource || !keypair || isLoading || backendStatus !== 'online' || txState !== 'idle'}
                   style={styles.button}
                 >
-                  {isLoading ? 'Creating Proof...' : 'Unshield Tokens'}
+                  {txState === 'pending' ? 'Starting Proof...' :
+                   txState === 'generating' ? 'Generating ZK Proof (~7 min)...' :
+                   txState === 'generating_proof' ? 'Generating Proof...' :
+                   txState === 'awaiting_signature' ? 'Confirm in Wallet...' :
+                   txState === 'confirming' ? 'Confirming...' :
+                   isLoading ? 'Creating Proof...' :
+                   'Unshield Tokens'}
                 </button>
               </div>
             )}
 
-            {isSuccess && (
+            {/* Approval transaction success */}
+            {isSuccess && txHash && (
               <div style={styles.successBox}>
-                Transaction confirmed! View on{' '}
+                Approval confirmed! View on{' '}
                 <a
                   href={`https://sepolia.etherscan.io/tx/${txHash}`}
                   target="_blank"
@@ -426,6 +551,70 @@ function App() {
                 >
                   Etherscan
                 </a>
+              </div>
+            )}
+
+            {/* Proof transaction status */}
+            {txState !== 'idle' && (
+              <div style={{
+                ...styles.infoBox,
+                background: txState === 'success' ? 'rgba(34, 197, 94, 0.1)' :
+                           txState === 'error' ? 'rgba(239, 68, 68, 0.1)' :
+                           'rgba(102, 126, 234, 0.1)',
+                borderColor: txState === 'success' ? 'rgba(34, 197, 94, 0.3)' :
+                            txState === 'error' ? 'rgba(239, 68, 68, 0.3)' :
+                            'rgba(102, 126, 234, 0.2)',
+                marginTop: '1rem',
+              }}>
+                {txState === 'generating_proof' && (
+                  <div>Generating ZK proof... This may take a few minutes.</div>
+                )}
+                {txState === 'awaiting_signature' && (
+                  <div>Please confirm the transaction in your wallet...</div>
+                )}
+                {txState === 'confirming' && (
+                  <div>
+                    Transaction sent! Waiting for confirmation...
+                    {proofTxHash && (
+                      <div style={{ marginTop: '0.5rem' }}>
+                        <a
+                          href={`https://sepolia.etherscan.io/tx/${proofTxHash}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={styles.link}
+                        >
+                          View on Etherscan
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {txState === 'success' && (
+                  <div style={{ color: '#22c55e' }}>
+                    Transaction confirmed!{' '}
+                    {proofTxHash && (
+                      <a
+                        href={`https://sepolia.etherscan.io/tx/${proofTxHash}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={styles.link}
+                      >
+                        View on Etherscan
+                      </a>
+                    )}
+                    <button onClick={resetTxState} style={{ ...styles.smallButton, marginLeft: '1rem' }}>
+                      Dismiss
+                    </button>
+                  </div>
+                )}
+                {txState === 'error' && (
+                  <div style={{ color: '#ef4444' }}>
+                    Transaction failed. Please try again.
+                    <button onClick={resetTxState} style={{ ...styles.smallButton, marginLeft: '1rem' }}>
+                      Dismiss
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>

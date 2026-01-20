@@ -35,3 +35,9 @@ erl_crash.dump
 
 # Source directory (cloned during setup)
 anoma-pa-source/
+
+# Rust/Prover
+shielded-actions/prover/target/
+shielded-actions/prover/Cargo.lock
+shielded-actions/prover/*.bin
+shielded-actions/prover/circuits/**/target/

@@ -1,12 +1,6 @@
 defmodule Backend.ProofService do
   @moduledoc """
-  Service for generating Anoma Resource Machine proofs.
-
-  Can operate in two modes:
-  1. Mock mode (default) - returns placeholder proofs for testing
-  2. Prover mode - calls the Rust prover service for real ZK proofs
-
-  Set PROVER_URL environment variable to enable prover mode.
+  Service for generating Anoma Resource Machine proofs via the Rust prover service.
   """
 
   require Logger
@@ -27,14 +21,8 @@ defmodule Backend.ProofService do
     "USDC" => 6
   }
 
-  # Get the prover service URL from environment
-  defp prover_url do
-    System.get_env("PROVER_URL")
-  end
-
-  defp use_real_prover? do
-    prover_url() != nil
-  end
+  # Prover service URL - always use localhost:3002
+  @prover_url "http://localhost:3002"
 
   @doc """
   Generate a new nullifier key pair for a user.
@@ -42,7 +30,6 @@ defmodule Backend.ProofService do
   """
   @spec generate_keypair() :: {:ok, map()} | {:error, String.t()}
   def generate_keypair do
-    # Generate random 32-byte keys
     private_key = :crypto.strong_rand_bytes(32)
     public_key = :crypto.hash(:sha256, private_key)
 
@@ -59,87 +46,45 @@ defmodule Backend.ProofService do
   @spec create_shield_transaction(String.t(), String.t(), String.t(), String.t()) ::
           {:ok, map()} | {:error, String.t()}
   def create_shield_transaction(token, amount, sender, nullifier_key_hex) do
-    if use_real_prover?() do
-      create_shield_transaction_with_prover(token, amount, sender, nullifier_key_hex)
-    else
-      create_shield_transaction_mock(token, amount, sender, nullifier_key_hex)
-    end
-  end
+    body = %{
+      token: token,
+      amount: amount,
+      sender: sender,
+      nullifier_key: nullifier_key_hex
+    }
 
-  defp create_shield_transaction_with_prover(token, amount, sender, nullifier_key_hex) do
-    try do
-      body = %{
-        token: token,
-        amount: amount,
-        sender: sender,
-        nullifier_key: nullifier_key_hex
-      }
+    Logger.info("Calling prover for shield: #{inspect(body)}")
 
-      case Req.post("#{prover_url()}/api/prove/shield", json: body) do
-        {:ok, %{status: 200, body: proof_response}} ->
-          # Build the full response with proof and forwarder call
-          forwarder_address = get_forwarder_address(token)
-          decimals = Map.get(@token_decimals, String.upcase(token), 18)
-          amount_wei = parse_amount(amount, decimals)
+    # Use 10 minute timeout for proof generation (Groth16 takes ~7 minutes)
+    case Req.post("#{@prover_url}/api/prove/shield", json: body, receive_timeout: 600_000) do
+      {:ok, %Req.Response{status: 200, body: proof_response}} ->
+        forwarder_address = get_forwarder_address(token)
+        decimals = Map.get(@token_decimals, String.upcase(token), 18)
+        amount_wei = parse_amount(amount, decimals)
 
-          resource = build_resource(token, amount_wei, sender, nullifier_key_hex, forwarder_address)
-          resource_commitment = :crypto.hash(:sha256, :erlang.term_to_binary(resource))
+        resource = build_resource(token, amount_wei, sender, nullifier_key_hex, forwarder_address)
+        resource_commitment = :crypto.hash(:sha256, :erlang.term_to_binary(resource))
 
-          {:ok,
-           %{
-             transaction: Jason.encode!(proof_response),
-             resource_commitment: Base.encode16(resource_commitment, case: :lower),
-             resource: resource,
-             forwarder_call: %{
-               to: forwarder_address,
-               data: encode_shield_call(sender, amount_wei)
-             },
-             proof: proof_response
-           }}
+        {:ok,
+         %{
+           transaction: Jason.encode!(proof_response),
+           resource_commitment: Base.encode16(resource_commitment, case: :lower),
+           resource: resource,
+           forwarder_call: %{
+             to: forwarder_address,
+             data: encode_shield_call(sender, amount_wei)
+           },
+           proof: proof_response,
+           calldata: Map.get(proof_response, "calldata") || Map.get(proof_response, :calldata)
+         }}
 
-        {:ok, %{status: status, body: body}} ->
-          {:error, "Prover error (#{status}): #{inspect(body)}"}
+      {:ok, %Req.Response{status: status, body: error_body}} ->
+        Logger.error("Prover error (#{status}): #{inspect(error_body)}")
+        {:error, "Prover error (#{status}): #{inspect(error_body)}"}
 
-        {:error, reason} ->
-          Logger.warning("Prover service unavailable, falling back to mock: #{inspect(reason)}")
-          create_shield_transaction_mock(token, amount, sender, nullifier_key_hex)
-      end
-    rescue
-      e ->
-        Logger.error("Prover call failed: #{inspect(e)}")
-        create_shield_transaction_mock(token, amount, sender, nullifier_key_hex)
-    end
-  end
-
-  defp create_shield_transaction_mock(token, amount, sender, nullifier_key_hex) do
-    try do
-      nullifier_key = decode_hex(nullifier_key_hex)
-      forwarder_address = get_forwarder_address(token)
-      decimals = Map.get(@token_decimals, String.upcase(token), 18)
-      amount_wei = parse_amount(amount, decimals)
-
-      resource = build_resource(token, amount_wei, sender, nullifier_key_hex, forwarder_address)
-      resource_commitment = :crypto.hash(:sha256, :erlang.term_to_binary(resource))
-      mock_proof = generate_mock_proof()
-
-      {:ok,
-       %{
-         transaction: Jason.encode!(%{
-           actions: [%{compliance_units: [mock_proof]}],
-           delta_proof: mock_proof,
-           mock: true,
-           note: "Mock proof. Set PROVER_URL for real ZK proofs via Bonsai/Boundless."
-         }),
-         resource_commitment: Base.encode16(resource_commitment, case: :lower),
-         resource: resource,
-         forwarder_call: %{
-           to: forwarder_address,
-           data: encode_shield_call(sender, amount_wei)
-         }
-       }}
-    rescue
-      e ->
-        {:error, "Failed to create shield transaction: #{inspect(e)}"}
+      {:error, reason} ->
+        Logger.error("Prover request failed: #{inspect(reason)}")
+        {:error, "Prover unavailable: #{inspect(reason)}"}
     end
   end
 
@@ -149,93 +94,48 @@ defmodule Backend.ProofService do
   @spec create_swap_transaction(map(), String.t(), String.t(), String.t()) ::
           {:ok, map()} | {:error, String.t()}
   def create_swap_transaction(input_resource_map, output_token, nullifier_key_hex, min_amount_out) do
-    if use_real_prover?() do
-      create_swap_transaction_with_prover(input_resource_map, output_token, nullifier_key_hex, min_amount_out)
-    else
-      create_swap_transaction_mock(input_resource_map, output_token, nullifier_key_hex, min_amount_out)
-    end
-  end
+    body = %{
+      input_resource: input_resource_map,
+      output_token: output_token,
+      nullifier_key: nullifier_key_hex,
+      min_amount_out: min_amount_out
+    }
 
-  defp create_swap_transaction_with_prover(input_resource_map, output_token, nullifier_key_hex, min_amount_out) do
-    try do
-      body = %{
-        input_resource: input_resource_map,
-        output_token: output_token,
-        nullifier_key: nullifier_key_hex,
-        min_amount_out: min_amount_out
-      }
+    Logger.info("Calling prover for swap: #{inspect(body)}")
 
-      case Req.post("#{prover_url()}/api/prove/swap", json: body) do
-        {:ok, %{status: 200, body: proof_response}} ->
-          nullifier_key = decode_hex(nullifier_key_hex)
-          output_decimals = Map.get(@token_decimals, String.upcase(output_token), 18)
-          min_amount_wei = parse_amount(min_amount_out, output_decimals)
-          input_amount = input_resource_map["quantity"] || input_resource_map[:quantity] || 0
-          output_forwarder = get_forwarder_address(output_token)
+    case Req.post("#{@prover_url}/api/prove/swap", json: body, receive_timeout: 600_000) do
+      {:ok, %Req.Response{status: 200, body: proof_response}} ->
+        nullifier_key = decode_hex(nullifier_key_hex)
+        output_decimals = Map.get(@token_decimals, String.upcase(output_token), 18)
+        min_amount_wei = parse_amount(min_amount_out, output_decimals)
+        input_amount = input_resource_map["quantity"] || input_resource_map[:quantity] || 0
+        output_forwarder = get_forwarder_address(output_token)
 
-          output_resource = build_swap_resource(output_token, min_amount_wei, input_resource_map, nullifier_key_hex, output_forwarder)
-          nullifier = :crypto.hash(:sha256, :erlang.term_to_binary({input_resource_map, nullifier_key}))
-          resource_commitment = :crypto.hash(:sha256, :erlang.term_to_binary(output_resource))
+        output_resource = build_swap_resource(output_token, min_amount_wei, input_resource_map, nullifier_key_hex, output_forwarder)
+        nullifier = :crypto.hash(:sha256, :erlang.term_to_binary({input_resource_map, nullifier_key}))
+        resource_commitment = :crypto.hash(:sha256, :erlang.term_to_binary(output_resource))
 
-          {:ok,
-           %{
-             transaction: Jason.encode!(proof_response),
-             nullifier: Base.encode16(nullifier, case: :lower),
-             new_resource_commitment: Base.encode16(resource_commitment, case: :lower),
-             new_resource: output_resource,
-             uniswap_call: %{
-               to: @contracts.uniswap_forwarder,
-               data: encode_swap_call(input_amount, min_amount_wei, output_token)
-             },
-             proof: proof_response
-           }}
+        {:ok,
+         %{
+           transaction: Jason.encode!(proof_response),
+           nullifier: Base.encode16(nullifier, case: :lower),
+           new_resource_commitment: Base.encode16(resource_commitment, case: :lower),
+           new_resource: output_resource,
+           uniswap_call: %{
+             to: @contracts.uniswap_forwarder,
+             data: encode_swap_call(input_amount, min_amount_wei, output_token)
+           },
+           proof: proof_response,
+           calldata: Map.get(proof_response, "calldata") || Map.get(proof_response, :calldata)
+         }}
 
-        {:ok, %{status: status, body: body}} ->
-          {:error, "Prover error (#{status}): #{inspect(body)}"}
+      {:ok, %Req.Response{status: status, body: error_body}} ->
+        Logger.error("Prover error (#{status}): #{inspect(error_body)}")
+        {:error, "Prover error (#{status}): #{inspect(error_body)}"}
 
-        {:error, reason} ->
-          Logger.warning("Prover unavailable, falling back to mock: #{inspect(reason)}")
-          create_swap_transaction_mock(input_resource_map, output_token, nullifier_key_hex, min_amount_out)
-      end
-    rescue
-      e ->
-        Logger.error("Prover call failed: #{inspect(e)}")
-        create_swap_transaction_mock(input_resource_map, output_token, nullifier_key_hex, min_amount_out)
-    end
-  end
-
-  defp create_swap_transaction_mock(input_resource_map, output_token, nullifier_key_hex, min_amount_out) do
-    try do
-      nullifier_key = decode_hex(nullifier_key_hex)
-      output_decimals = Map.get(@token_decimals, String.upcase(output_token), 18)
-      min_amount_wei = parse_amount(min_amount_out, output_decimals)
-      input_amount = input_resource_map["quantity"] || input_resource_map[:quantity] || 0
-      output_forwarder = get_forwarder_address(output_token)
-
-      output_resource = build_swap_resource(output_token, min_amount_wei, input_resource_map, nullifier_key_hex, output_forwarder)
-      nullifier = :crypto.hash(:sha256, :erlang.term_to_binary({input_resource_map, nullifier_key}))
-      resource_commitment = :crypto.hash(:sha256, :erlang.term_to_binary(output_resource))
-      mock_proof = generate_mock_proof()
-
-      {:ok,
-       %{
-         transaction: Jason.encode!(%{
-           actions: [%{compliance_units: [mock_proof]}],
-           delta_proof: mock_proof,
-           mock: true,
-           note: "Mock proof. Set PROVER_URL for real ZK proofs via Bonsai/Boundless."
-         }),
-         nullifier: Base.encode16(nullifier, case: :lower),
-         new_resource_commitment: Base.encode16(resource_commitment, case: :lower),
-         new_resource: output_resource,
-         uniswap_call: %{
-           to: @contracts.uniswap_forwarder,
-           data: encode_swap_call(input_amount, min_amount_wei, output_token)
-         }
-       }}
-    rescue
-      e ->
-        {:error, "Failed to create swap transaction: #{inspect(e)}"}
+      {:error, reason} ->
+        Logger.error("Prover request failed: #{inspect(reason)}")
+        {:error, "Prover unavailable: #{inspect(reason)}"}
     end
   end
 
@@ -245,85 +145,46 @@ defmodule Backend.ProofService do
   @spec create_unshield_transaction(map(), String.t(), String.t()) ::
           {:ok, map()} | {:error, String.t()}
   def create_unshield_transaction(resource_map, recipient, nullifier_key_hex) do
-    if use_real_prover?() do
-      create_unshield_transaction_with_prover(resource_map, recipient, nullifier_key_hex)
-    else
-      create_unshield_transaction_mock(resource_map, recipient, nullifier_key_hex)
-    end
-  end
+    body = %{
+      resource: resource_map,
+      recipient: recipient,
+      nullifier_key: nullifier_key_hex
+    }
 
-  defp create_unshield_transaction_with_prover(resource_map, recipient, nullifier_key_hex) do
-    try do
-      body = %{
-        resource: resource_map,
-        recipient: recipient,
-        nullifier_key: nullifier_key_hex
-      }
+    Logger.info("Calling prover for unshield: #{inspect(body)}")
 
-      case Req.post("#{prover_url()}/api/prove/unshield", json: body) do
-        {:ok, %{status: 200, body: proof_response}} ->
-          nullifier_key = decode_hex(nullifier_key_hex)
-          amount = resource_map["quantity"] || resource_map[:quantity] || 0
-          nullifier = :crypto.hash(:sha256, :erlang.term_to_binary({resource_map, nullifier_key}))
-          logic_ref = resource_map["logic_ref"] || resource_map[:logic_ref]
-          forwarder_address = decode_forwarder_from_logic_ref(logic_ref)
+    case Req.post("#{@prover_url}/api/prove/unshield", json: body, receive_timeout: 600_000) do
+      {:ok, %Req.Response{status: 200, body: proof_response}} ->
+        nullifier_key = decode_hex(nullifier_key_hex)
+        amount = resource_map["quantity"] || resource_map[:quantity] || 0
+        nullifier = :crypto.hash(:sha256, :erlang.term_to_binary({resource_map, nullifier_key}))
+        logic_ref = resource_map["logic_ref"] || resource_map[:logic_ref]
+        forwarder_address = decode_forwarder_from_logic_ref(logic_ref)
 
-          {:ok,
-           %{
-             transaction: Jason.encode!(proof_response),
-             nullifier: Base.encode16(nullifier, case: :lower),
-             forwarder_call: %{
-               to: forwarder_address,
-               data: encode_unshield_call(recipient, amount)
-             },
-             proof: proof_response
-           }}
+        {:ok,
+         %{
+           transaction: Jason.encode!(proof_response),
+           nullifier: Base.encode16(nullifier, case: :lower),
+           forwarder_call: %{
+             to: forwarder_address,
+             data: encode_unshield_call(recipient, amount)
+           },
+           proof: proof_response,
+           calldata: Map.get(proof_response, "calldata") || Map.get(proof_response, :calldata)
+         }}
 
-        {:ok, %{status: status, body: body}} ->
-          {:error, "Prover error (#{status}): #{inspect(body)}"}
+      {:ok, %Req.Response{status: status, body: error_body}} ->
+        Logger.error("Prover error (#{status}): #{inspect(error_body)}")
+        {:error, "Prover error (#{status}): #{inspect(error_body)}"}
 
-        {:error, reason} ->
-          Logger.warning("Prover unavailable, falling back to mock: #{inspect(reason)}")
-          create_unshield_transaction_mock(resource_map, recipient, nullifier_key_hex)
-      end
-    rescue
-      e ->
-        Logger.error("Prover call failed: #{inspect(e)}")
-        create_unshield_transaction_mock(resource_map, recipient, nullifier_key_hex)
-    end
-  end
-
-  defp create_unshield_transaction_mock(resource_map, recipient, nullifier_key_hex) do
-    try do
-      nullifier_key = decode_hex(nullifier_key_hex)
-      amount = resource_map["quantity"] || resource_map[:quantity] || 0
-      nullifier = :crypto.hash(:sha256, :erlang.term_to_binary({resource_map, nullifier_key}))
-      logic_ref = resource_map["logic_ref"] || resource_map[:logic_ref]
-      forwarder_address = decode_forwarder_from_logic_ref(logic_ref)
-      mock_proof = generate_mock_proof()
-
-      {:ok,
-       %{
-         transaction: Jason.encode!(%{
-           actions: [%{compliance_units: [mock_proof]}],
-           delta_proof: mock_proof,
-           mock: true,
-           note: "Mock proof. Set PROVER_URL for real ZK proofs via Bonsai/Boundless."
-         }),
-         nullifier: Base.encode16(nullifier, case: :lower),
-         forwarder_call: %{
-           to: forwarder_address,
-           data: encode_unshield_call(recipient, amount)
-         }
-       }}
-    rescue
-      e ->
-        {:error, "Failed to create unshield transaction: #{inspect(e)}"}
+      {:error, reason} ->
+        Logger.error("Prover request failed: #{inspect(reason)}")
+        {:error, "Prover unavailable: #{inspect(reason)}"}
     end
   end
 
   @doc """
-  Get shielded resources for an address (placeholder for demo).
+  Get shielded resources for an address.
   """
   @spec get_resources(String.t()) :: list()
   def get_resources(_address) do
@@ -394,11 +255,6 @@ defmodule Backend.ProofService do
   defp hash_logic_ref(address), do: :crypto.hash(:sha256, address)
   defp hash_label_ref(token), do: :crypto.hash(:sha256, token)
   defp hash_value_ref(owner), do: :crypto.hash(:sha256, owner)
-
-  defp generate_mock_proof do
-    proof_bytes = :crypto.strong_rand_bytes(64)
-    Base.encode16(proof_bytes, case: :lower)
-  end
 
   defp encode_shield_call(sender, amount) do
     selector = "23b872dd"
