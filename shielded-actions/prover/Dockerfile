@@ -1,7 +1,10 @@
 # Build stage - use nightly for edition2024 support
-FROM rustlang/rust:nightly-slim-bookworm AS build
+FROM rust:latest AS build
 
 WORKDIR /app
+
+# Install rustup and switch to nightly
+RUN rustup default nightly
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
