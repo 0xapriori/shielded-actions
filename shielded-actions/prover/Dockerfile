@@ -13,8 +13,9 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy manifests
+# Copy manifests and local dependencies
 COPY Cargo.toml Cargo.lock* ./
+COPY circuits ./circuits
 
 # Create a dummy main.rs to build dependencies
 RUN mkdir src && echo "fn main() {}" > src/main.rs
