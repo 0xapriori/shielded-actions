@@ -1,5 +1,5 @@
-# Build stage
-FROM rust:1.83-slim-bookworm AS build
+# Build stage - use nightly for edition2024 support
+FROM rustlang/rust:nightly-slim-bookworm AS build
 
 WORKDIR /app
 
@@ -7,6 +7,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy manifests
