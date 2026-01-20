@@ -13,21 +13,13 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy manifests and local dependencies
+# Copy everything needed for the build
 COPY Cargo.toml Cargo.lock* ./
 COPY circuits ./circuits
-
-# Create a dummy main.rs to build dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-
-# Build dependencies only (cached layer)
-RUN cargo build --release && rm -rf src
-
-# Copy actual source code
 COPY src ./src
 
 # Build the application
-RUN touch src/main.rs && cargo build --release
+RUN cargo build --release --bin shielded-prover
 
 # Runtime stage
 FROM debian:bookworm-slim
